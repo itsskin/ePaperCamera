@@ -1,5 +1,16 @@
 import os
+import time
 import _thread
+
+# Запись на flash идёт кусками с паузами между ними. Причина не в скорости
+# (она та же), а в том, что запись на ESP32 останавливает выполнение на
+# ОБОИХ ядрах: кэш инструкций общий с флешем. Архив 150КБ плюс панельная
+# копия 60КБ — это около четырёх секунд, и одним куском они превращаются
+# в четыре секунды полностью замороженной платы: веб не отвечает, нажатие
+# кнопки не обрабатывается. Куски по 8КБ с паузой отдают управление между
+# собой, и плата остаётся живой всё это время.
+WRITE_CHUNK = 8192
+WRITE_PAUSE_MS = 20
 
 PHOTOS_DIR = "/photos"
 # Рядом с каждым снимком лежит вторая, маленькая копия — ровно тот кадр
@@ -85,6 +96,20 @@ def delete_photo(name):
         print("delete error:", path)
         return False
     return True
+
+
+def _write_chunked(path, data):
+    """Пишет файл кусками с паузами — чтобы плата не замирала целиком на
+    всё время записи (см. WRITE_CHUNK)."""
+    mv = memoryview(data)
+    total = len(mv)
+    with open(path, "wb") as f:
+        off = 0
+        while off < total:
+            f.write(mv[off:off + WRITE_CHUNK])
+            off += WRITE_CHUNK
+            if off < total:
+                time.sleep_ms(WRITE_PAUSE_MS)
 
 
 def _panel_path(bmp_path):
@@ -178,12 +203,10 @@ def _worker(raw_y, src_w, src_h, dst_w, dst_h, mode, label, save):
             _cleanup_if_low_space()
             seq = _next_seq()
             path = "%s/%06d.bmp" % (PHOTOS_DIR, seq)
-            with open(path, "wb") as f:
-                f.write(img)
+            _write_chunked(path, img)
             del img
             gc.collect()
-            with open(_panel_path(path), "wb") as f:
-                f.write(panel_img)
+            _write_chunked(_panel_path(path), panel_img)
             del panel_img
             gc.collect()
             _cleanup_if_low_space()

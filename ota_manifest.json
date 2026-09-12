@@ -3,12 +3,12 @@
   "bmp.py": "c8c84e806a7aabcdbcc2ed1dde4c13f1e281f2d04e4abd517d395c933a81e6f5",
   "dither.py": "617f3a17232096f36925a175f40d5acb7130ba3ec90f7d8239b723d772b07cd9",
   "epaper.py": "fdd14b5ced731db8cb8dc36881f9b14fea4f02e582997195eed8e8f95dc5580e",
-  "main.py": "f83b8e8ee5cfcccc9916bd1b7eb9cc23b080cb452051245de2bc3e0cffa80b49",
+  "main.py": "b461abe8e9fb70c6dfd7c191d4594535a8b169a44f8cb0da113be33a233ee61a",
   "ota.py": "d3ec9eec019ebebd216825dd346ee30f85b0377c991cf6c45cfb433cc625c7b3",
-  "persist.py": "c672621c4080ee33d6caa16b47434db95287ebb79d22f5f46c29bc2145f057ab",
+  "persist.py": "33339f70e267f44cb8c84a4c9a5c049ae8737c0d036f8521b4264257c829c4cd",
   "web_app.py": "005f65e4d06e5f5f127edb519e3b96c3190239bb23e18e36fd1e62ebff844f92",
   "wifi_manager.py": "9449b569f307a098eb5c6be7903e0141ea5d19a6c2ff4c634fb653a59a2bf713",
   "yuv.py": "5e97b6d223d2fbb354b1d6dc4db040cc9fc8db264be6418077453c2444607a5e"
  },
- "version": 3
+ "version": 4
 }
