@@ -861,6 +861,13 @@ def run_camera_server(ip, ap_ip=""):
             return 200, "text/plain", "Изображение принято, вывожу на экран".encode()
         return 200, "text/plain", "Экран занят, попробуй ещё раз".encode()
 
+    def _ota_version():
+        try:
+            import ota
+            return ota.current_version()
+        except Exception:
+            return None
+
     def _pm():
         try:
             import network
@@ -888,6 +895,7 @@ def run_camera_server(ip, ap_ip=""):
             "reset": reset_cause,
             "abnormal_resets": abnormal,
             "hist_idx": state["hist_idx"],
+            "version": _ota_version(),
             "txpower": _txpower(),
             "pm": _pm(),
         }).encode()
