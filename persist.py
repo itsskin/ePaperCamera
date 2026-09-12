@@ -9,7 +9,18 @@ import _thread
 # в четыре секунды полностью замороженной платы: веб не отвечает, нажатие
 # кнопки не обрабатывается. Куски по 8КБ с паузой отдают управление между
 # собой, и плата остаётся живой всё это время.
+# 8КБ — кратно блоку файловой системы (4КБ) и подобрано замером.
+# Пробовали мельче, по 2КБ: стало ВТРОЕ хуже (отклик доходил до 15с
+# против 3с). Причина в том, что littlefs всё равно работает блоками по
+# 4КБ, и запись меньшими порциями заставляет её перезаписывать один блок
+# по нескольку раз — суммарного времени с замороженными ядрами получается
+# намного больше, хотя каждая отдельная заморозка короче.
 WRITE_CHUNK = 8192
+# 20мс паузы на каждые 8КБ. Пробовали 150мс, чтобы уравновесить 145мс
+# заморозки ядер на самой записи, — оказалось напрасной жертвой: запись
+# архива выросла с 4 до 9 секунд, а нажатия и так не теряются, их
+# запоминает прерывание. Измерено: кадр целиком занимал 19с, из них 9 —
+# только запись.
 WRITE_PAUSE_MS = 20
 
 PHOTOS_DIR = "/photos"
@@ -21,11 +32,87 @@ PHOTOS_DIR = "/photos"
 # 150КБ у архива. Расширение своё, чтобы копия не попадала в галерею;
 # внутри обычный BMP.
 PANEL_EXT = ".pan"
+
+# Хранить в галерее полный кадр камеры или ту же картинку, что ушла на
+# экран.
+#
+# Полный кадр — это отдельный дизеринг на 640x480 и запись 150КБ вместо
+# 60КБ, а вместе — десять секунд из шестнадцати на кадр (измерено на
+# плате). Всё это время плата занята, и физический спуск ждёт очереди.
+# Полный кадр нужен галерее, то есть вебу, а он вторичен — поэтому по
+# умолчанию храним версию для экрана.
+#
+# True вернёт полный кадр на 150КБ, если галерея станет важнее скорости
+# спуска.
+ARCHIVE_FULL_FRAME = False
 SEQ_FILE = PHOTOS_DIR + "/_seq"
 MIN_FREE_RATIO = 0.20  # чистим старые снимки, если свободно меньше 20%
 
 _lock = _thread.allocate_lock()
 _saving = False
+# Последняя ошибка фонового потока. Он печатает её в консоль, но у платы
+# на батарее консоли нет — поэтому держим здесь и показываем в /status.
+last_error = ""
+
+# Кадр, ожидающий обработки, пока занят предыдущий. Слот один: если
+# нажать ещё раз, свежий кадр вытесняет ожидающий — на экран человек
+# хочет видеть последний снимок, а не тот, что был две попытки назад.
+#
+# Раньше занятость означала молчаливый отказ, и это выглядело так:
+# светодиод загорается, кадр снят, а экран не обновляется вовсе. Фоновая
+# работа после снимка идёт около десяти секунд, так что попасть в занятое
+# окно проще, чем не попасть.
+_pending = None
+
+# Когда начался текущий кадр и на каком он этапе. Нужно, чтобы застрявший
+# поток было видно снаружи: если он умрёт, не сняв флаг занятости, всё
+# последующее будет молча вставать в очередь навсегда.
+_started_ms = 0
+_stage = "покой"
+
+
+def state():
+    busy = _saving
+    return {
+        "saving": busy,
+        "queued": _pending is not None,
+        "stage": _stage,
+        "render_ms": time.ticks_diff(time.ticks_ms(), _started_ms) if busy else 0,
+    }
+
+
+def _mark(stage):
+    global _stage
+    _stage = stage
+
+
+# Буферы для архива живут всё время работы платы и переиспользуются.
+#
+# Выделять их на каждый кадр дорого не памятью (её в PSRAM много), а
+# сборщиком мусора: полный кадр требует 600КБ под буфер ошибок, столько
+# же временных байт и 150КБ под сам BMP, и на таком выделении MicroPython
+# запускает полную сборку по всей куче. Она идёт около двух секунд, ничему
+# не уступает управление, и нажатие кнопки в это окно теряется целиком.
+#
+# HW-замерено: без архива худший отклик платы 0.4с, с архивом — 2.9с, и
+# провалов ровно столько, сколько крупных выделений.
+#
+# Только для архива: превью в вебе считаются в другом потоке, и общий
+# буфер они бы затёрли друг другу.
+_buffers = {}
+
+
+def _archive_buffers(n_pixels, bmp_size):
+    import array
+
+    bufs = _buffers
+    if bufs.get("n") != n_pixels:
+        bufs["work"] = array.array("H", bytes(2 * n_pixels))
+        bufs["out"] = bytearray(n_pixels)
+        bufs["n"] = n_pixels
+    if len(bufs.get("bmp") or b"") < bmp_size:
+        bufs["bmp"] = bytearray(bmp_size)
+    return bufs["work"], bufs["out"], bufs["bmp"]
 
 
 def _ensure_dir():
@@ -72,18 +159,6 @@ def path_for(name):
     if name not in list_photos():
         return None
     return PHOTOS_DIR + "/" + name
-
-
-def photo_mode(name):
-    """Режим снимка — по глубине BMP: 4 бита на пиксель это 4 градации,
-    1 бит — ч/б. Читаем заголовок, а не судим по размеру файла: размер
-    совпадает только пока разрешение панели одно и то же."""
-    try:
-        with open(PHOTOS_DIR + "/" + name, "rb") as f:
-            hdr = f.read(30)
-        return "4g" if int.from_bytes(hdr[28:30], "little") == 4 else "bw"
-    except OSError:
-        return "bw"
 
 
 def delete_photo(name):
@@ -144,7 +219,28 @@ def _cleanup_if_low_space():
             break
 
 
-def _worker(raw_y, src_w, src_h, dst_w, dst_h, mode, label, save):
+def _worker(args):
+    """Обрабатывает кадр, а потом — тот, что успел встать в очередь, не
+    выходя из потока: заново поднимать поток на каждый кадр незачем."""
+    global _saving, _pending, _started_ms
+    while True:
+        try:
+            _started_ms = time.ticks_ms()
+            _render_one(*args)
+        except Exception as e:
+            global last_error
+            last_error = "render/save: %r" % e
+            print("background render/save error:", repr(e))
+        with _lock:
+            if _pending is None:
+                _saving = False
+                _mark("покой")
+                return
+            args = _pending
+            _pending = None
+
+
+def _render_one(raw_y, src_w, src_h, dst_w, dst_h, label, save):
     # Всё тяжёлое — ресайз, дизеринг, вывод на панель, упаковка в BMP,
     # запись на flash, очистка — здесь, а не в вызывающем потоке:
     # пользователь должен увидеть снимок в вебе сразу после захвата,
@@ -159,43 +255,47 @@ def _worker(raw_y, src_w, src_h, dst_w, dst_h, mode, label, save):
     # На flash кладём ровно то, что ушло на панель, а не отдельный
     # вариант с порогом, как раньше: история должна совпадать с тем,
     # что человек увидел на экране.
-    global _saving
     try:
-        import gc
         import dither
         import epaper
-        from bmp import binary_to_bmp, gray4_to_bmp
+        from bmp import gray4_to_bmp
 
         # 1. Панель: кадр обрезается по краям до 400x300 и получает подпись.
+        _mark("дизеринг для панели")
         cropped = dither.resize_crop_nearest(raw_y, src_w, src_h, dst_w, dst_h)
-        if mode == "4g":
-            panel = dither.floyd_steinberg_4g(cropped, dst_w, dst_h)
-            if label:
-                epaper.overlay_text(panel, label, fg=0, bg=3)
-            epaper.show_4g(panel)
-            panel_img = gray4_to_bmp(panel, dst_w, dst_h) if save else None
-        else:
-            panel = dither.floyd_steinberg(cropped, dst_w, dst_h)
-            if label:
-                epaper.overlay_text(panel, label, fg=0, bg=255)
-            epaper.show_bw(panel)
-            panel_img = binary_to_bmp(panel, dst_w, dst_h) if save else None
+        panel = dither.floyd_steinberg_4g(cropped, dst_w, dst_h)
+        if label:
+            epaper.overlay_text(panel, label, fg=0, bg=3)
+        _mark("обновление панели")
+        epaper.show_4g(panel)
+        panel_img = gray4_to_bmp(panel, dst_w, dst_h) if save else None
+        # gc.collect() здесь раньше стоял, и это была ошибка: с кучей в
+        # несколько мегабайт PSRAM полная сборка идёт около двух секунд и
+        # ничему не уступает управление. Три таких вызова в этом потоке
+        # давали три окна, в которые терялось нажатие кнопки. Ссылки
+        # снимаем через del, а собирать мусор MicroPython умеет сам —
+        # он делает это при нехватке памяти на очередное выделение.
         del cropped, panel
-        gc.collect()
 
         # 2. История: полный кадр камеры, без обрезки под панель и без
         # подписи — это архив снимка, а не копия того, что на стекле.
         # 640x480 в 4 градациях занимает 150КБ против 60КБ у обрезанного
         # 400x300, но обрезать архив под конкретную панель незачем.
-        if save:
-            if mode == "4g":
-                full = dither.floyd_steinberg_4g(raw_y, src_w, src_h)
-                img = gray4_to_bmp(full, src_w, src_h)
-            else:
-                full = dither.floyd_steinberg(raw_y, src_w, src_h)
-                img = binary_to_bmp(full, src_w, src_h)
+        if save and ARCHIVE_FULL_FRAME:
+            _mark("дизеринг архива")
+            n = src_w * src_h
+            # 4 бита на пиксель плюс заголовок с палитрой
+            bmp_size = 54 + 64 + ((src_w * 4 + 31) // 32) * 4 * src_h
+            work, out, bmp = _archive_buffers(n, bmp_size)
+            full = dither.floyd_steinberg_4g(raw_y, src_w, src_h, work, out)
+            img = gray4_to_bmp(full, src_w, src_h, bmp)
             del full
-            gc.collect()
+        elif save:
+            # Готовая картинка для экрана уже посчитана выше — она же и
+            # идёт в галерею. Отдельной панельной копии тогда не нужно:
+            # архив ей и является.
+            img = panel_img
+            panel_img = None
 
             _ensure_dir()
             # Чистим и ДО записи: если места уже впритык, запись просто
@@ -203,18 +303,15 @@ def _worker(raw_y, src_w, src_h, dst_w, dst_h, mode, label, save):
             _cleanup_if_low_space()
             seq = _next_seq()
             path = "%s/%06d.bmp" % (PHOTOS_DIR, seq)
+            _mark("запись архива")
             _write_chunked(path, img)
             del img
-            gc.collect()
-            _write_chunked(_panel_path(path), panel_img)
+            if panel_img is not None:
+                _write_chunked(_panel_path(path), panel_img)
             del panel_img
-            gc.collect()
             _cleanup_if_low_space()
-    except Exception as e:
-        print("background render/save error:", repr(e))
     finally:
-        with _lock:
-            _saving = False
+        pass
 
 
 def _show_worker(path):
@@ -230,25 +327,24 @@ def _show_worker(path):
         except OSError:
             pass
         buf, w, h, mode = load_bmp_pixels(path)
-        if (w, h) != (epaper.WIDTH, epaper.HEIGHT):
-            # Старый снимок, сохранённый до появления панельной копии.
-            # Ближайшим соседом такую картинку ужимать нельзя — она уже
-            # дизеренная, и пересчёт разрушает структуру точек. Усредняем
-            # по площади (это возвращает полутона, закодированные
-            # плотностью точек) и дизерим заново под размер панели.
+        if mode != "4g" or (w, h) != (epaper.WIDTH, epaper.HEIGHT):
+            # Либо чужой размер, либо старый чёрно-белый снимок, снятый до
+            # того, как остался единственный алгоритм.
+            #
+            # Ближайшим соседом дизеренную картинку ужимать нельзя —
+            # пересчёт разрушает структуру точек. Усредняем по площади
+            # (это возвращает полутона, закодированные плотностью точек) и
+            # дизерим заново. Для чёрно-белых то же усреднение переводит
+            # их в полутона, а дизеринг — в четыре уровня панели.
             import dither
             gray = dither.resize_crop_box(
                 buf, w, h, epaper.WIDTH, epaper.HEIGHT, 85 if mode == "4g" else 1)
-            if mode == "4g":
-                buf = dither.floyd_steinberg_4g(gray, epaper.WIDTH, epaper.HEIGHT)
-            else:
-                buf = dither.floyd_steinberg(gray, epaper.WIDTH, epaper.HEIGHT)
+            buf = dither.floyd_steinberg_4g(gray, epaper.WIDTH, epaper.HEIGHT)
             del gray
-        if mode == "4g":
-            epaper.show_4g(buf)
-        else:
-            epaper.show_bw(buf)
+        epaper.show_4g(buf)
     except Exception as e:
+        global last_error
+        last_error = "show: %r" % e
         print("show saved error:", repr(e))
     finally:
         with _lock:
@@ -261,6 +357,8 @@ def show_saved_background(path):
     global _saving
     with _lock:
         if _saving:
+            global last_error
+            last_error = "занято: панель обновляется"
             print("panel busy, skipping show request")
             return False
         _saving = True
@@ -268,7 +366,7 @@ def show_saved_background(path):
     return True
 
 
-def render_and_save_background(raw_y, src_w, src_h, dst_w, dst_h, mode="bw",
+def render_and_save_background(raw_y, src_w, src_h, dst_w, dst_h,
                                label="", save=True):
     """Выводит кадр на e-paper и (если save) кладёт копию в историю на
     flash, не блокируя вызывающего ничем из этого. Если предыдущая такая
@@ -277,11 +375,13 @@ def render_and_save_background(raw_y, src_w, src_h, dst_w, dst_h, mode="bw",
 
     save=False нужен для перерисовки уже снятого кадра в другом режиме —
     сам снимок при этом тот же, плодить в истории его копии незачем."""
-    global _saving
+    global _saving, _pending
+    args = (raw_y, src_w, src_h, dst_w, dst_h, label, save)
     with _lock:
         if _saving:
-            print("previous render/save still running, skipping this one")
-            return False
+            _pending = args
+            print("занято, кадр поставлен в очередь")
+            return "queued"
         _saving = True
-    _thread.start_new_thread(_worker, (raw_y, src_w, src_h, dst_w, dst_h, mode, label, save))
+    _thread.start_new_thread(_worker, (args,))
     return True

@@ -138,16 +138,6 @@ def _set_window():
     _cmd(0x4F, bytes([0, 0]))
 
 
-def _init_bw():
-    _reset()
-    _cmd(0x12)
-    _wait_busy()
-    _cmd(0x01, bytes([(HEIGHT - 1) & 0xFF, (HEIGHT - 1) >> 8, 0x00]))
-    _cmd(0x3C, b"\x01")
-    _cmd(0x18, b"\x80")
-    _cmd(0x11, b"\x03")
-
-
 def _init_4g():
     _reset()
     _cmd(0x12)
@@ -161,25 +151,6 @@ def _init_4g():
     _cmd(0x03, bytes([_LUT_4G[228]]))
     _cmd(0x04, bytes([_LUT_4G[229], _LUT_4G[230], _LUT_4G[231]]))
     _cmd(0x2C, bytes([_LUT_4G[232]]))
-
-
-@micropython.viper
-def _pack_bw(dst: ptr8, src: ptr8, n_bytes: int):
-    # src: 0/255 -> 1 бит на пиксель, БЕЗ инверсии.
-    #
-    # При 0x21 = 0x40 0x00 (RED inverted, B/W normal) панель понимает
-    # плоскость 0x24 как 1 = белый, 0 = чёрный — то есть ровно то же, что
-    # значит 255/0 на входе после дизеринга. Инверсия тут была ошибкой:
-    # она осталась от test_display.py, где источником был framebuf, а там
-    # наоборот 1 = закрашено (чёрное), и XOR был нужен.
-    for i in range(n_bytes):
-        base = i * 8
-        b = 0
-        for k in range(8):
-            b = b << 1
-            if src[base + k] != 0:
-                b = b | 1
-        dst[i] = b
 
 
 @micropython.viper
@@ -237,26 +208,6 @@ def overlay_text(buf, text, x=2, y=HEIGHT - 11, fg=0, bg=255):
                 continue
             if (tmp[trow + (tx >> 3)] >> (7 - (tx & 7))) & 1:
                 buf[row + px] = fg
-
-
-def show_bw(pixels):
-    """pixels: WIDTH*HEIGHT байт со значениями 0/255 (как отдаёт
-    dither.floyd_steinberg / threshold / ordered_bayer)."""
-    _pins()
-    _init_bw()
-    n_bytes = WIDTH * HEIGHT // 8
-    plane = bytearray(n_bytes)
-    _pack_bw(plane, pixels, n_bytes)
-    _set_window()
-    _cmd(0x24, plane)
-    _cmd(0x21, b"\x40\x00")
-    # "Fast full update": панели подсовывается завышенная температура,
-    # из-за чего она сама выбирает более короткий LUT. Пиксели всё равно
-    # перещёлкиваются полностью, это не partial-обновление.
-    _cmd(0x1A, b"\x6E")
-    _cmd(0x22, b"\xD7")
-    _cmd(0x20)
-    _wait_busy()
 
 
 def show_4g(levels):

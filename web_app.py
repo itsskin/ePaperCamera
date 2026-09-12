@@ -43,6 +43,18 @@ def _unquote(s):
     return out
 
 
+# Вызывается между порциями при отдаче ответа. Нужно потому, что отдача
+# 150КБ по Wi-Fi занимает десятки секунд, и всё это время главный поток
+# занят — а физическая кнопка опрашивается как раз в нём (HW-замерено:
+# без этого промежуток между опросами доходил до 55 секунд, и нажатие
+# срабатывало с такой же задержкой).
+#
+# Колбэк должен только НАБЛЮДАТЬ состояние кнопки, но не выполнять
+# действие: выполнять съёмку посреди недоотданного ответа — верный способ
+# получить трудноуловимые гонки.
+_tick = None
+
+
 def _sendall(cl, data):
     mv = memoryview(data)
     sent = 0
@@ -52,6 +64,8 @@ def _sendall(cl, data):
         if n is None:
             continue
         sent += n
+        if _tick is not None:
+            _tick()
 
 
 MAX_BODY = 1024 * 1024
@@ -91,12 +105,14 @@ def _read_body(cl_file, headers):
     return buf
 
 
-def run_server(routes, port=80, on_idle=None, idle_interval_sec=1.0):
+def run_server(routes, port=80, on_idle=None, idle_interval_sec=1.0, on_tick=None):
     """routes: dict {(method, path): handler(query, headers, body) -> (status, content_type, body_bytes)}
 
     on_idle вызывается примерно раз в idle_interval_sec, когда нет входящих
     запросов — иначе цикл вечно висит в accept() и между запросами вообще
     ничего не может делать (нужно, например, чтобы гасить камеру по простою)."""
+    global _tick
+    _tick = on_tick
     addr = socket.getaddrinfo("0.0.0.0", port)[0][-1]
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -154,6 +170,8 @@ def run_server(routes, port=80, on_idle=None, idle_interval_sec=1.0):
                             if not chunk:
                                 break
                             _sendall(cl, chunk)
+                            if on_tick is not None:
+                                on_tick()
                 else:
                     header = (
                         "HTTP/1.0 %d OK\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"

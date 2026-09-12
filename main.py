@@ -1,4 +1,3 @@
-import gc
 import time
 
 import wifi_manager
@@ -25,15 +24,7 @@ select{width:100%;padding:10px;font-size:16px;margin-top:12px}
 input{width:100%;padding:10px;font-size:16px;margin-top:8px;box-sizing:border-box}
 button{width:100%;padding:14px;font-size:18px;margin-top:12px}</style></head>
 <body><h2>ePaperCamera</h2>
-<img id="p" src="/dither?algo=floyd4">
-<select id="algo" onchange="redraw()">
-<option value="floyd4" selected>Флойд, 4 градации (150 КБ)</option>
-<option value="floyd">Флойд-Стейнберг (38 КБ, быстро)</option>
-<option value="threshold">Порог (38 КБ, быстро)</option>
-<option value="bayer">Bayer 4x4 (38 КБ, быстро)</option>
-<option value="none">Оригинал, 8 бит (308 КБ, медленно)</option>
-<option value="color">Цвет (922 КБ, очень медленно)</option>
-</select>
+<img id="p" src="/dither">
 <select id="delay">
 <option value="0">Без задержки</option>
 <option value="0.5" selected>Задержка 0.5 с</option>
@@ -44,15 +35,13 @@ button{width:100%;padding:14px;font-size:18px;margin-top:12px}</style></head>
 <option value="10">Задержка 10 с</option>
 </select>
 <button onclick="shoot()">Сделать фото</button>
-<p style="color:#888;font-size:14px">Кнопка BOOT на плате: одно нажатие — снимок в выбранном режиме и с той же задержкой,
-двойное — предыдущий кадр из истории на экран, тройное — шаг вперёд</p>
+<p style="color:#888;font-size:14px">Кнопка BOOT на плате: короткое нажатие — снимок в выбранном режиме и с той же задержкой,
+удержание 1.2 с — предыдущий кадр из истории на экран, 3 с — шаг вперёд.
+Светодиод мигает, когда порог удержания пройден.</p>
 <p id="s"></p>
 <h3>На экране (400x300, обрезка по краям)</h3>
-<select id="mode" onchange="changeMode()">
-<option value="4g" selected>4 градации серого (обновление ~5.6 с)</option>
-<option value="bw">Ч/б, Флойд-Стейнберг (обновление ~2.4 с)</option>
-</select>
-<img id="epaper" src="/epaper_preview?mode=4g">
+<img id="epaper" src="/epaper_preview">
+<button onclick="changeMode()">Перерисовать экран</button>
 <h3>Сохранённые снимки</h3>
 <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
 <button onclick="step(-1)" style="width:64px;margin:0;padding:10px">&#9664;</button>
@@ -83,22 +72,17 @@ button{width:100%;padding:14px;font-size:18px;margin-top:12px}</style></head>
 <p style="color:#888;font-size:14px">{security}</p>
 <script>
 function redraw(){
-  const algo = document.getElementById('algo').value;
-  document.getElementById('p').src = '/dither?algo=' + algo + '&t=' + Date.now();
+  document.getElementById('p').src = '/dither?t=' + Date.now();
 }
-function epaperMode(){ return document.getElementById('mode').value; }
 function changeMode(){
-  // Смена режима — это и другое превью, и другая картинка на самой
-  // панели: держать их разными смысла нет.
   redrawEpaper();
   document.getElementById('s').textContent = 'Перерисовываю экран...';
-  fetch('/render?mode=' + epaperMode()).then(r=>r.text()).then(t=>{
+  fetch('/render').then(r=>r.text()).then(t=>{
     document.getElementById('s').textContent = t;
   });
 }
 function redrawEpaper(){
-  document.getElementById('epaper').src =
-    '/epaper_preview?mode=' + epaperMode() + '&t=' + Date.now();
+  document.getElementById('epaper').src = '/epaper_preview?t=' + Date.now();
 }
 function loadList(fallbackIndex){
   fetch('/list').then(r=>r.json()).then(items=>{
@@ -108,7 +92,7 @@ function loadList(fallbackIndex){
     items.forEach(it=>{
       const o = document.createElement('option');
       o.value = it.name;
-      o.textContent = it.name + (it.mode === '4g' ? ' — 4 градации' : ' — ч/б');
+      o.textContent = it.name;
       sel.appendChild(o);
     });
     if (!items.length) {
@@ -219,13 +203,13 @@ function uploadPhoto(){
     c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, 400, 300);
     URL.revokeObjectURL(url);
     const d = c.getContext('2d').getImageData(0, 0, 400, 300).data;
-    // BT.601, те же коэффициенты, что и в yuv.py для кадра с камеры
+    // BT.601 — стандартные коэффициенты яркости
     const gray = new Uint8Array(400 * 300);
     for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
       gray[j] = (d[i] * 77 + d[i+1] * 150 + d[i+2] * 29) >> 8;
     }
     st.textContent = 'Отправляю на плату (117 КБ)...';
-    fetch('/upload?mode=' + epaperMode(), {method: 'POST', body: gray})
+    fetch('/upload', {method: 'POST', body: gray})
       .then(r=>r.text()).then(t=>{
         st.textContent = t;
         setTimeout(loadList, 12000);
@@ -260,7 +244,7 @@ function shoot(){
       document.getElementById('s').textContent = t + ' — вывожу на экран...';
       // На панель и в историю — только когда в вебе всё уже показано:
       // обновление e-paper само по себе занимает секунды.
-      fetch('/save?mode=' + epaperMode()).then(()=>{
+      fetch('/save').then(()=>{
         webShot = false;
         document.getElementById('s').textContent = t + ' — отправлено на экран';
         // Снимок пишется на flash в том же фоновом потоке, что и вывод
@@ -313,9 +297,6 @@ CAMERA_IDLE_MS = 60000
 # та же самая.
 DEFAULT_DELAY_MS = 500
 
-# Режим панели по умолчанию — 4 градации: полутонов заметно больше, а
-# лишние 3.2с на обновление уходят в фон и путь съёмки не задерживают.
-DEFAULT_MODE = "4g"
 
 # Красный светодиод платы. Нашёлся перебором свободных выводов: зелёный
 # рядом с ним — индикатор питания, он висит на 3.3В напрямую и никакому
@@ -332,12 +313,20 @@ LED_NAV_MS = 1000
 # Кнопка BOOT: одно нажатие — снимок, двойное — предыдущий кадр из
 # истории на экран, тройное — шаг вперёд.
 #
-# 80мс подавления дребезга, а не 300, как было: с порогом в 300мс второй
-# щелчок двойного нажатия просто отбрасывался бы вместе с дребезгом.
-# 350мс — окно, в течение которого ждём продолжения серии. Плата за
-# различение серий: одиночное нажатие срабатывает на это окно позже.
-BUTTON_DEBOUNCE_MS = 80
-BUTTON_WINDOW_MS = 250
+# Кнопка: короткое нажатие — снимок, удержание — листание истории.
+#
+# Серии нажатий (двойное, тройное) пришлось убрать. GPIO0 — вывод схемы
+# автосброса, на нём висит конденсатор: при отпускании вывод возвращается
+# к питанию медленно, и на этом фронте вход даёт лишние срабатывания.
+# Появляются они примерно через длительность нажатия после нажатия, то
+# есть по времени неотличимы от настоящего второго щелчка — отсюда и
+# срабатывание через раз, которое так и не удалось отфильтровать.
+#
+# Длительность удержания такой помехе не подвержена вовсе: она читается
+# по уровню вывода, а не по фронтам.
+BUTTON_DEBOUNCE_MS = 40
+BUTTON_HOLD_PREV_MS = 1200
+BUTTON_HOLD_NEXT_MS = 3000
 
 
 # Зелёный светодиод на плате — индикатор питания, он подключён к линии
@@ -362,15 +351,22 @@ def valid_module_name(name):
     return ".." not in name
 
 
+# Явных gc.collect() в обработчиках больше нет.
+#
+# Они стояли против фрагментации, но оказались куда дороже: полная сборка
+# по многомегабайтной куче PSRAM идёт около двух секунд и ничему не
+# уступает управление. Физическая кнопка опрашивается в том же потоке —
+# то есть каждый такой вызов был окном, в которое нажатие не замечалось
+# (HW-замерено: промежуток между опросами кнопки доходил до 2.4с).
+# Собирать мусор MicroPython умеет сам, при нехватке памяти на выделение.
 def run_camera_server(ip, ap_ip=""):
     from camera import Camera, PixelFormat, FrameSize
     from machine import Pin, Timer
-    from bmp import grayscale_to_bmp, binary_to_bmp, gray4_to_bmp
+    from bmp import gray4_to_bmp
     import dither
     import epaper
     import persist
 
-    import yuv
 
     # Пробовали fb_count=2 + GrabMode.LATEST вместо ручного двойного
     # захвата — HW-подтверждено ХУЖЕ на этой связке (постоянные cam_hal
@@ -391,8 +387,6 @@ def run_camera_server(ip, ap_ip=""):
     #
     # Цвет ("Цвет" в селекторе) — отдельный, нечастый случай: временно
     # переключаем камеру в YUV422 через reconfigure(), снимаем один кадр,
-    # конвертируем в RGB сами (yuv.py, обходя сломанный RGB565), и
-    # переключаем обратно в GRAYSCALE — см. capture_color() ниже.
     # Камера включается лениво и гасится после CAMERA_IDLE_MS простоя:
     # при fb_count=1 сенсор свободно бежит по кадрам (экспозиция, ISP, PLL
     # от XCLK, выгрузка по DVP) всё время, пока инициализирован — отсюда
@@ -526,17 +520,18 @@ def run_camera_server(ip, ap_ip=""):
     # Само нажатие ловим прерыванием, а обрабатываем в цикле сервера:
     # в обработчике прерывания MicroPython нельзя ни выделять память,
     # ни, тем более, снимать кадр и гонять SPI на панель.
-    btn_state = {"count": 0, "last_ms": 0}
-
-    def _on_button(pin):
-        now = time.ticks_ms()
-        if time.ticks_diff(now, btn_state["last_ms"]) < BUTTON_DEBOUNCE_MS:
-            return  # дребезг
-        btn_state["last_ms"] = now
-        btn_state["count"] += 1
-
     shutter = Pin(0, Pin.IN, Pin.PULL_UP)
-    shutter.irq(trigger=Pin.IRQ_FALLING, handler=_on_button)
+    # level — последний признанный уровень; нажатие это 0, отпущено 1.
+    # latched ставит прерывание: аппаратура запоминает фронт даже когда
+    # опрашивать некому (запись на флеш физически замораживает оба ядра),
+    # и нажатие, целиком уместившееся в такое окно, иначе пропало бы.
+    btn_state = {"level": 1, "down_ms": 0, "changed_ms": 0,
+                 "latched": False, "acted": False, "pending": None}
+
+    def _on_edge(pin):
+        btn_state["latched"] = True
+
+    shutter.irq(trigger=Pin.IRQ_FALLING, handler=_on_edge)
 
     def show_history(step):
         """Листает историю на самой панели, без веба.
@@ -567,32 +562,93 @@ def run_camera_server(ip, ap_ip=""):
             persist.show_saved_background(path)
 
     def button_check():
-        if btn_state["count"] == 0:
+        """Опрос кнопки, 20 раз в секунду.
+
+        Решение принимается по длительности удержания и в момент
+        отпускания: коротко — снимок, 1.2с — предыдущий кадр из истории,
+        3с — следующий. О пересечении порогов сообщает светодиод, чтобы
+        не приходилось угадывать, сколько ещё держать."""
+        now = time.ticks_ms()
+        level = shutter.value()
+
+        if level != btn_state["level"]:
+            # Уровень должен продержаться, иначе это дребезг контакта.
+            if time.ticks_diff(now, btn_state["changed_ms"]) < BUTTON_DEBOUNCE_MS:
+                return
+            btn_state["changed_ms"] = now
+            btn_state["level"] = level
+            btn_state["latched"] = False
+            if level == 0:
+                btn_state["down_ms"] = now
+                btn_state["acted"] = False
+                btn_state["hinted"] = False
+            elif btn_state["down_ms"] and not btn_state["acted"]:
+                btn_state["acted"] = True
+                # Не выполняем здесь: наблюдение вызывается и посреди
+                # отдачи ответа, а снимать в этот момент нельзя.
+                btn_state["pending"] = time.ticks_diff(now, btn_state["down_ms"])
             return
-        # Ждём, не продолжится ли серия: пока щелчки идут, решать рано.
-        if time.ticks_diff(time.ticks_ms(), btn_state["last_ms"]) < BUTTON_WINDOW_MS:
+
+        if level == 0 and btn_state["down_ms"] and not btn_state["acted"]:
+            # Подсказка светодиодом на пересечении порога: держать
+            # дальше — или отпускать.
+            held = time.ticks_diff(now, btn_state["down_ms"])
+            if held >= BUTTON_HOLD_PREV_MS and not btn_state.get("hinted"):
+                btn_state["hinted"] = True
+                led_signal(LED_NAV_MS)
             return
-        clicks = btn_state["count"]
-        btn_state["count"] = 0
-        if clicks >= 2:
-            # 2 — назад по времени, 3 и больше — вперёд.
-            show_history(1 if clicks == 2 else -1)
+
+        if btn_state["latched"] and level == 1:
+            # Прерывание видело нажатие, которого опрос не застал: оно
+            # целиком уместилось в окно, когда оба ядра стояли на записи
+            # флеша. Считаем коротким — длительность узнать уже негде.
+            btn_state["latched"] = False
+            btn_state["acted"] = True
+            btn_state["pending"] = 0
+
+    def button_dispatch():
+        """Выполняет отложенное действие кнопки. Вызывается только из
+        холостого хода серверного цикла — то есть когда ответ клиенту уже
+        отдан и снимать безопасно."""
+        held = btn_state["pending"]
+        if held is None:
             return
+        btn_state["pending"] = None
+        button_act(held)
+
+    def button_act(held_ms):
+        # Что плата решила по нажатию — видно в /status: консоли у неё в
+        # автономном режиме нет, а угадывать по симптомам дорого.
+        state["last_action"] = "удержание %dмс -> " % held_ms
+        if held_ms >= BUTTON_HOLD_NEXT_MS:
+            state["last_action"] += "вперёд по истории"
+            show_history(-1)
+            return
+        if held_ms >= BUTTON_HOLD_PREV_MS:
+            state["last_action"] += "назад по истории"
+            show_history(1)
+            return
+        state["last_action"] += "съёмка"
         print("shutter button pressed")
         try:
-            # Отсчёт задержки — от первого щелчка серии: окно распознавания
-            # серии человек уже отждал.
-            capture_now(btn_state["last_ms"])
+            # Отсчёт задержки — от момента нажатия: пока кнопку держали,
+            # человек уже ждал, и вычитать это время дважды незачем.
+            capture_now(btn_state["down_ms"] or None)
             state["pending_save"] = False
-            # Новый кадр сбрасывает листание: следующее двойное нажатие
-            # должно начинать с самого свежего снимка, а не с того места,
-            # где человек листал до съёмки.
+            # Новый кадр сбрасывает листание: следующее удержание должно
+            # начинать с самого свежего снимка, а не с того места, где
+            # человек листал до съёмки.
             state["hist_idx"] = -1
-            persist.render_and_save_background(
+            ok = persist.render_and_save_background(
                 state["raw"], PHOTO_WIDTH, PHOTO_HEIGHT,
-                DISPLAY_WIDTH, DISPLAY_HEIGHT, state["mode"], state["label"]
+                DISPLAY_WIDTH, DISPLAY_HEIGHT, state["label"]
             )
+            if ok == "queued":
+                state["last_action"] += " (в очереди, экран ещё занят)"
+            elif not ok:
+                state["last_action"] += " (не выведен)"
         except Exception as e:
+            state["last_action"] += " ошибка %r" % e
             print("shutter error:", repr(e))
 
     def reboot_check():
@@ -602,9 +658,32 @@ def run_camera_server(ip, ap_ip=""):
             print("rebooting after wifi change")
             machine.reset()
 
-    def on_idle():
-        reboot_check()
+    # Самый большой промежуток между двумя опросами кнопки. Это и есть
+    # настоящая мера отзывчивости спуска: пока главный поток не получил
+    # управление, нажатие некому заметить. Задержку HTTP для этого мерить
+    # нельзя — она включает повторные передачи TCP и раздувает короткую
+    # заморозку ядер до секунд.
+    idle_gap = {"last": time.ticks_ms(), "max": 0}
+
+    def button_tick():
+        """Только наблюдение за кнопкой. Зовётся и из холостого хода, и
+        между порциями отдаваемого ответа."""
+        now = time.ticks_ms()
+        gap = time.ticks_diff(now, idle_gap["last"])
+        idle_gap["last"] = now
+        if gap > idle_gap["max"]:
+            idle_gap["max"] = gap
         button_check()
+
+    # Дизеринг зовёт наблюдение за кнопкой между полосами: полный кадр
+    # считается около двух секунд, и в главном потоке (превью для веба)
+    # это было окно, в которое нажатие не замечалось.
+    dither.on_yield = button_tick
+
+    def on_idle():
+        button_tick()
+        button_dispatch()
+        reboot_check()
         camera_idle_check()
 
     # HW-подтверждено: сам захват камеры быстрый и чистый (~400мс).
@@ -620,10 +699,11 @@ def run_camera_server(ip, ap_ip=""):
     # На кадре — только последняя группа адреса: остальное в домашней
     # сети и так одинаково, а шрифт тут один и самый мелкий (8x8), так
     # что короткая подпись занимает вчетверо меньше места.
-    state = {"raw": None, "pending_save": False, "mode": DEFAULT_MODE,
+    state = {"raw": None, "pending_save": False,
              "label": (ip or ap_ip or "?").split(".")[-1],
              "delay_ms": DEFAULT_DELAY_MS,
-             "seq": 0, "reboot_at": None, "hist_idx": -1}
+             "seq": 0, "reboot_at": None, "hist_idx": -1,
+             "last_action": "нажатий не было"}
 
     def capture_now(since_ms=None):
         """since_ms — момент, от которого считается задержка автоспуска:
@@ -659,24 +739,6 @@ def run_camera_server(ip, ap_ip=""):
         # потом пишем" — страница дёргает /save сама, когда оба превью уже
         # загрузились (см. CAMERA_PAGE).
         state["pending_save"] = True
-        gc.collect()
-
-    def capture_color():
-        cam = ensure_cam()
-        # Временный YUV422+VGA заход "из принципа" — не пытаемся держать
-        # это надёжным на постоянной основе (см. комментарий выше про
-        # YUV422 внутри приложения), только на один снимок за раз.
-        cam.reconfigure(pixel_format=PixelFormat.YUV422, frame_size=FrameSize.VGA)
-        _apply_sensor(cam)
-        try:
-            cam.capture()
-            cam.free_buffer()
-            img = bytes(cam.capture())
-            cam.free_buffer()
-        finally:
-            cam.reconfigure(pixel_format=PixelFormat.GRAYSCALE, frame_size=FrameSize.VGA)
-            _apply_sensor(cam)
-        return img
 
     def ensure_frame():
         """Первый кадр снимаем по запросу, а не на старте.
@@ -732,45 +794,11 @@ def run_camera_server(ip, ap_ip=""):
         return 200, "text/plain", ("Готово (%d мс)" % dt).encode()
 
     def handle_dither(query, headers, body=None):
-        algo = query.get("algo", "none")
-        if algo == "color":
-            # Отдельный нечастый захват (VGA, YUV422) — временно
-            # переключает камеру и переключает обратно, см. capture_color().
-            try:
-                raw_yuv = capture_color()
-            except Exception as e:
-                return 200, "text/plain", ("Ошибка цветного снимка: %r" % e).encode()
-            out = yuv.yuv422_to_bmp(raw_yuv, 640, 480)
-            gc.collect()
-            return 200, "image/bmp", out
-        ensure_frame()
-        if algo == "floyd4":
-            # 4 градации — то же диффузионное распространение ошибки, но
-            # квантование в 4 уровня; на выходе номера уровней 0..3,
-            # поэтому и BMP отдельный, 4 бита на пиксель (вдвое меньше
-            # 8-битного оригинала при том же наборе тонов, что реально
-            # покажет панель).
-            levels = dither.floyd_steinberg_4g(state["raw"], PHOTO_WIDTH, PHOTO_HEIGHT)
-            out = gray4_to_bmp(levels, PHOTO_WIDTH, PHOTO_HEIGHT)
-            gc.collect()
-            return 200, "image/bmp", out
-        fn = dither.ALGORITHMS.get(algo)
-        if fn is None and algo != "none":
-            return 200, "text/plain", ("Неизвестный алгоритм: %s" % algo).encode()
-        # Веб-превью — нативное разрешение камеры (640x480), без
-        # уменьшения (user: "в веб полную с камеры без уменьшений").
-        # Уменьшение до 400x300 остаётся только в persist.py — там оно
-        # для e-paper, а не для веб-показа.
-        ensure_frame()
-        raw = state["raw"]
-        if fn is None:
-            out = grayscale_to_bmp(raw, PHOTO_WIDTH, PHOTO_HEIGHT, scale=1)
-        else:
-            result = fn(raw, PHOTO_WIDTH, PHOTO_HEIGHT)
-            # threshold/floyd/bayer уже строго 0/255 — упаковываем в 1bpp
-            # (в 8 раз меньше файл, передача по Wi-Fi была узким местом)
-            out = binary_to_bmp(result, PHOTO_WIDTH, PHOTO_HEIGHT)
-        gc.collect()
+        # Единственный алгоритм: Флойд-Стейнберг в 4 градации. На выходе
+        # номера уровней 0..3, поэтому BMP четырёхбитный — ровно тот набор
+        # тонов, который реально покажет панель.
+        levels = dither.floyd_steinberg_4g(state["raw"], PHOTO_WIDTH, PHOTO_HEIGHT)
+        out = gray4_to_bmp(levels, PHOTO_WIDTH, PHOTO_HEIGHT)
         return 200, "image/bmp", out
 
     def handle_epaper_preview(query, headers, body=None):
@@ -780,17 +808,10 @@ def run_camera_server(ip, ap_ip=""):
         # результат фонового потока: превью показывается ДО того, как тот
         # вообще запустится.
         ensure_frame()
-        mode = query.get("mode", DEFAULT_MODE)
         cropped = dither.resize_crop_nearest(state["raw"], PHOTO_WIDTH, PHOTO_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-        if mode == "4g":
-            levels = dither.floyd_steinberg_4g(cropped, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-            epaper.overlay_text(levels, state["label"], fg=0, bg=3)
-            out = gray4_to_bmp(levels, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-        else:
-            result = dither.floyd_steinberg(cropped, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-            epaper.overlay_text(result, state["label"], fg=0, bg=255)
-            out = binary_to_bmp(result, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-        gc.collect()
+        levels = dither.floyd_steinberg_4g(cropped, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+        epaper.overlay_text(levels, state["label"], fg=0, bg=3)
+        out = gray4_to_bmp(levels, DISPLAY_WIDTH, DISPLAY_HEIGHT)
         return 200, "image/bmp", out
 
     def handle_wifi_save(query, headers, body=None):
@@ -885,13 +906,12 @@ def run_camera_server(ip, ap_ip=""):
             return 400, "text/plain", (
                 "Ожидал %d байт (серый %dx%d), пришло %d"
                 % (n, DISPLAY_WIDTH, DISPLAY_HEIGHT, got)).encode()
-        state["mode"] = query.get("mode", DEFAULT_MODE)
         camera_off()
         # Подпись с адресом не наносим: это не снимок с камеры, а картинка,
         # которую человек принёс сам.
         if persist.render_and_save_background(
             body, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-            state["mode"], "", True
+            "", True
         ):
             return 200, "text/plain", "Изображение принято, вывожу на экран".encode()
         return 200, "text/plain", "Экран занят, попробуй ещё раз".encode()
@@ -919,9 +939,10 @@ def run_camera_server(ip, ap_ip=""):
 
     def handle_status(query, headers, body=None):
         import json
+        if query.get("reset_gap"):
+            idle_gap["max"] = 0
         return 200, "application/json", json.dumps({
             "seq": state["seq"],
-            "mode": state["mode"],
             "ip": ip,
             "ap": ap_ip,
             # Причина последнего старта. Читается по сети специально:
@@ -930,6 +951,10 @@ def run_camera_server(ip, ap_ip=""):
             "reset": reset_cause,
             "abnormal_resets": abnormal,
             "hist_idx": state["hist_idx"],
+            "last_action": state["last_action"],
+            "last_error": persist.last_error,
+            "max_idle_gap_ms": idle_gap["max"],
+            "worker": persist.state(),
             "version": _ota_version(),
             "txpower": _txpower(),
             "pm": _pm(),
@@ -946,11 +971,10 @@ def run_camera_server(ip, ap_ip=""):
         # не пишем: снимок тот же самый, копии в галерее не нужны.
         if state["raw"] is None:
             return 200, "text/plain", "Ещё нечего показывать".encode()
-        state["mode"] = query.get("mode", DEFAULT_MODE)
         camera_off()
         if persist.render_and_save_background(
             state["raw"], PHOTO_WIDTH, PHOTO_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-            state["mode"], state["label"], False
+            state["label"], False
         ):
             return 200, "text/plain", "Перерисовываю экран".encode()
         return 200, "text/plain", "Экран занят, попробуй ещё раз".encode()
@@ -962,19 +986,15 @@ def run_camera_server(ip, ap_ip=""):
         if not state["pending_save"]:
             return 200, "text/plain", b"nothing to save"
         state["pending_save"] = False
-        state["mode"] = query.get("mode", DEFAULT_MODE)
         persist.render_and_save_background(
             state["raw"], PHOTO_WIDTH, PHOTO_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-            state["mode"], state["label"]
+            state["label"]
         )
         return 200, "text/plain", b"rendering"
 
     def handle_list(query, headers, body=None):
-        # Отдаём вместе с режимом: снимки, сделанные в ч/б и в 4 градациях,
-        # лежат вперемешку, а по имени их не различить.
         import json
-        items = [{"name": n, "mode": persist.photo_mode(n)}
-                 for n in persist.list_photos()]
+        items = [{"name": n} for n in persist.list_photos()]
         return 200, "application/json", json.dumps(items).encode()
 
     def handle_photo(query, headers, body=None):
@@ -1014,7 +1034,11 @@ def run_camera_server(ip, ap_ip=""):
     }
     # 0.1с, а не 0.2: в этот такт опрашивается кнопка, и половина такта
     # прибавляется к задержке между нажатием и кадром.
-    run_server(routes, on_idle=on_idle, idle_interval_sec=0.1)
+    # 0.05с: в этот такт опрашивается кнопка, и такт должен быть заметно
+    # короче самого короткого осмысленного нажатия, иначе его можно
+    # проспать целиком.
+    run_server(routes, on_idle=on_idle, idle_interval_sec=0.05,
+               on_tick=button_tick)
 
 
 def main():

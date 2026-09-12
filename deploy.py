@@ -48,7 +48,6 @@ PROJECT_FILES = [
     "dither.py",
     "bmp.py",
     "persist.py",
-    "yuv.py",
     "main.py",
 ]
 

@@ -30,7 +30,6 @@ FIRMWARE_FILES = [
     "dither.py",
     "bmp.py",
     "persist.py",
-    "yuv.py",
     "ota.py",
 ]
 
