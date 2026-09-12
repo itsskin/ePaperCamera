@@ -1,0 +1,166 @@
+# Проверка 4 градаций серого на WeAct 4.2" (GDEY042T81 / SSD1683).
+#
+# У контроллера две RAM-плоскости (0x24 и 0x26). В обычном ч/б режиме
+# используется только одна. Если загрузить специальную таблицу волновых
+# форм (LUT, команда 0x32), пара бит из двух плоскостей даёт 4 уровня.
+#
+# LUT и последовательность инициализации взяты не наугад, а из рабочего
+# драйвера именно этой панели: ZinggJM/GxEPD2_4G,
+# src/gdey/GxEPD2_420_GDEY042T81.cpp (там они, в свою очередь, из
+# референсного кода Waveshare).
+
+import time
+import micropython
+from machine import Pin, SPI
+
+PINS = {"sck": 42, "mosi": 41, "cs": 45, "dc": 48, "rst": 47, "busy": 21}
+
+WIDTH = 400
+HEIGHT = 300
+
+# 227 байт LUT + 6 байт настроек напряжений (индексы 227..232)
+LUT_4G = bytes([
+    0x01, 0x0A, 0x1B, 0x0F, 0x03, 0x01, 0x01,
+    0x05, 0x0A, 0x01, 0x0A, 0x01, 0x01, 0x01,
+    0x05, 0x08, 0x03, 0x02, 0x04, 0x01, 0x01,
+    0x01, 0x04, 0x04, 0x02, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x0A, 0x1B, 0x0F, 0x03, 0x01, 0x01,
+    0x05, 0x4A, 0x01, 0x8A, 0x01, 0x01, 0x01,
+    0x05, 0x48, 0x03, 0x82, 0x84, 0x01, 0x01,
+    0x01, 0x84, 0x84, 0x82, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x0A, 0x1B, 0x8F, 0x03, 0x01, 0x01,
+    0x05, 0x4A, 0x01, 0x8A, 0x01, 0x01, 0x01,
+    0x05, 0x48, 0x83, 0x82, 0x04, 0x01, 0x01,
+    0x01, 0x04, 0x04, 0x02, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x8A, 0x1B, 0x8F, 0x03, 0x01, 0x01,
+    0x05, 0x4A, 0x01, 0x8A, 0x01, 0x01, 0x01,
+    0x05, 0x48, 0x83, 0x02, 0x04, 0x01, 0x01,
+    0x01, 0x04, 0x04, 0x02, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x8A, 0x9B, 0x8F, 0x03, 0x01, 0x01,
+    0x05, 0x4A, 0x01, 0x8A, 0x01, 0x01, 0x01,
+    0x05, 0x48, 0x03, 0x42, 0x04, 0x01, 0x01,
+    0x01, 0x04, 0x04, 0x42, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x07, 0x17, 0x41, 0xA8,
+    0x32, 0x30,
+])
+
+spi = SPI(1, baudrate=4_000_000, polarity=0, phase=0,
+          sck=Pin(PINS["sck"]), mosi=Pin(PINS["mosi"]))
+cs = Pin(PINS["cs"], Pin.OUT, value=1)
+dc = Pin(PINS["dc"], Pin.OUT, value=0)
+rst = Pin(PINS["rst"], Pin.OUT, value=1)
+busy = Pin(PINS["busy"], Pin.IN)
+
+
+def wait_busy(timeout_ms=30000):
+    t0 = time.ticks_ms()
+    while busy.value() == 1:
+        if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+            raise RuntimeError("EPD busy timeout")
+        time.sleep_ms(10)
+
+
+def cmd(c, data=b""):
+    dc(0)
+    cs(0)
+    spi.write(bytes([c]))
+    cs(1)
+    if data:
+        dc(1)
+        cs(0)
+        spi.write(data)
+        cs(1)
+
+
+def set_window():
+    cmd(0x11, b"\x03")
+    cmd(0x44, bytes([0, (WIDTH - 1) // 8]))
+    cmd(0x45, bytes([0, 0, (HEIGHT - 1) & 0xFF, (HEIGHT - 1) >> 8]))
+    cmd(0x4E, bytes([0]))
+    cmd(0x4F, bytes([0, 0]))
+
+
+def init_4g():
+    rst(0)
+    time.sleep_ms(20)
+    rst(1)
+    time.sleep_ms(20)
+    wait_busy()
+    cmd(0x12)  # SWRESET
+    wait_busy()
+    cmd(0x0C, b"\x8B\x9C\xA4\x0F")  # soft start
+    cmd(0x21, b"\x00\x00")
+    cmd(0x3C, b"\x03")  # border
+    set_window()
+    cmd(0x32, LUT_4G[0:227])
+    cmd(0x3F, bytes([LUT_4G[227]]))
+    cmd(0x03, bytes([LUT_4G[228]]))               # VGH
+    cmd(0x04, bytes([LUT_4G[229], LUT_4G[230], LUT_4G[231]]))  # VSH1, VSH2, VSL
+    cmd(0x2C, bytes([LUT_4G[232]]))               # VCOM
+
+
+@micropython.viper
+def _pack_plane(dst: ptr8, src: ptr8, n_bytes: int, mode: int):
+    """Уровни 0..3 -> один бит на пиксель, байты сразу инвертированы
+    (в GxEPD2 передаётся ~out_byte).
+      mode 0 -> плоскость 0x26: бит = 1, если уровень >= 2
+      mode 1 -> плоскость 0x24: бит = младший бит уровня"""
+    for i in range(n_bytes):
+        base = i * 8
+        b = 0
+        for k in range(8):
+            b = b << 1
+            v = int(src[base + k])
+            if mode == 0:
+                if v >= 2:
+                    b = b | 1
+            else:
+                b = b | (v & 1)
+        dst[i] = b ^ 0xFF
+
+
+def show_4g(levels):
+    n_bytes = WIDTH * HEIGHT // 8
+    plane = bytearray(n_bytes)
+
+    set_window()
+    _pack_plane(plane, levels, n_bytes, 0)
+    cmd(0x26, plane)
+
+    set_window()
+    _pack_plane(plane, levels, n_bytes, 1)
+    cmd(0x24, plane)
+
+    cmd(0x21, b"\x88\x00")  # b/w inverted, RED inverted
+    cmd(0x22, b"\xCF")
+    cmd(0x20)
+    wait_busy()
+
+
+# Тестовая картинка: четыре вертикальные полосы по 100px —
+# чёрная, тёмно-серая, светло-серая, белая. Плоские заливки, чтобы
+# разница тонов была видна сразу, без влияния дизеринга.
+levels = bytearray(WIDTH * HEIGHT)
+for y in range(HEIGHT):
+    row = y * WIDTH
+    for x in range(WIDTH):
+        levels[row + x] = x // 100
+
+print("init 4-gray...")
+init_4g()
+print("sending 2 planes + grey refresh...")
+t0 = time.ticks_ms()
+show_4g(levels)
+print("done in %d ms" % time.ticks_diff(time.ticks_ms(), t0))
