@@ -87,8 +87,14 @@ def _get(url, timeout, _redirects=2):
     try:
         s.connect(ai[-1])
         s = ssl.wrap_socket(s, server_hostname=host)
+        # Cache-Control против промежуточных кэшей. Сеть доставки самого
+        # GitHub его не слушается: свежий коммит становится виден в
+        # raw.githubusercontent через несколько минут, а в jsDelivr и
+        # вовсе через часы. Так что после git push обновление появляется
+        # на плате не сразу — это нормально и не признак поломки.
         s.write(b"GET %s HTTP/1.0\r\nHost: %s\r\n"
                 b"User-Agent: ePaperCamera-ESP32/1.0\r\n"
+                b"Cache-Control: no-cache\r\nPragma: no-cache\r\n"
                 b"Connection: close\r\n\r\n" % (path.encode(), host.encode()))
         chunks = []
         while True:
