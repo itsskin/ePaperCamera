@@ -17,3 +17,6 @@ firmware/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Токен заливки кода на плату — секрет, не для репозитория.
+.push_token

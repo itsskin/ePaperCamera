@@ -30,7 +30,11 @@ TX_POWER_DBM = 13
 WIFI_PM = 2
 
 AP_SSID = "ePaperCamera-Setup"
-AP_PASSWORD = "12345678"
+# Пароль точки доступа по умолчанию. Он лежит в публичном репозитории,
+# то есть секретом не является вообще — это заведомо временное значение
+# на первое включение. Свой задаётся в веб-интерфейсе и хранится в
+# wifi_config.json, который в репозиторий не попадает.
+AP_PASSWORD_DEFAULT = "12345678"
 
 
 def load_config():
@@ -41,9 +45,43 @@ def load_config():
         return {"ssid": "", "password": ""}
 
 
-def save_config(ssid, password):
+def ap_password():
+    """Свой пароль точки доступа, если задан. Короче восьми символов Wi-Fi
+    не принимает, поэтому такие молча игнорируем — иначе точка не
+    поднялась бы вообще и до платы стало бы не добраться."""
+    pwd = load_config().get("ap_password") or ""
+    return pwd if len(pwd) >= 8 else AP_PASSWORD_DEFAULT
+
+
+def push_token():
+    """Токен для заливки кода по сети. Пусто — проверки нет (так плата и
+    ведёт себя из коробки, чтобы первое включение ничего не требовало)."""
+    return load_config().get("push_token") or ""
+
+
+def save_config(ssid, password, ap_password=None, push_token=None):
+    """Дописывает, а не перезаписывает: в этом же файле живут пароль точки
+    доступа и токен заливки, и сохранение домашней сети не должно их
+    сносить. Пустые значения означают "не менять" — иначе пустое поле
+    формы стирало бы уже заданный пароль."""
+    cfg = load_config()
+    cfg["ssid"] = ssid
+    # Пустой пароль — "не менять", как и у остальных полей. Иначе отправка
+    # формы ради смены только пароля точки доступа стирала бы пароль
+    # домашней сети, и плата теряла бы сеть на следующей же загрузке.
+    if password:
+        cfg["password"] = "" if password == "-" else password
+    elif "password" not in cfg:
+        cfg["password"] = ""
+    # Одиночный минус — "снять". Без такого условного значения пустое
+    # поле формы означало бы "не менять", и заданный однажды пароль или
+    # токен убрать через интерфейс было бы уже нельзя.
+    if ap_password:
+        cfg["ap_password"] = "" if ap_password == "-" else ap_password
+    if push_token:
+        cfg["push_token"] = "" if push_token == "-" else push_token
     with open(CONFIG_PATH, "w") as f:
-        json.dump({"ssid": ssid, "password": password}, f)
+        json.dump(cfg, f)
 
 
 def ensure_ap(sta_ip=None):
@@ -67,7 +105,7 @@ def start_ap(ip=AP_IP):
     time.sleep_ms(100)
     ap.ifconfig((ip, "255.255.255.0", ip, ip))
     ap.active(True)
-    ap.config(essid=AP_SSID, password=AP_PASSWORD, authmode=network.AUTH_WPA_WPA2_PSK)
+    ap.config(essid=AP_SSID, password=ap_password(), authmode=network.AUTH_WPA_WPA2_PSK)
     limit_tx_power(ap)
     time.sleep_ms(200)
     print("AP ifconfig:", ap.ifconfig())

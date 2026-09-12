@@ -17,6 +17,7 @@ MicroPython) она отвечает на 115200. Скрипт должен ра
     python3 deploy.py --wifi         # по сети, без USB вообще
 """
 
+import os
 import sys
 import time
 
@@ -53,9 +54,21 @@ PROJECT_FILES = [
 
 
 BOARD_HOST = "192.168.1.105"
+# Токен заливки, если он задан на плате. Лежит в отдельном файле рядом с
+# проектом и в репозиторий не попадает (см. .gitignore) — в самом коде
+# ему места нет, репозиторий публичный.
+TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".push_token")
 
 
-def deploy_over_wifi(files, host, do_reset):
+def read_token():
+    try:
+        with open(TOKEN_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def deploy_over_wifi(files, host, do_reset, token=""):
     """Заливка по сети. Нужна потому, что драйвер USB-моста на маке
     регулярно залипает (перестаёт менять скорость порта), а плата при
     этом продолжает работать и отвечать по Wi-Fi."""
@@ -66,8 +79,10 @@ def deploy_over_wifi(files, host, do_reset):
     for name in files:
         with open(name, "rb") as f:
             data = f.read()
-        req = urllib.request.Request(
-            "http://%s/push?path=%s" % (host, name), data=data, method="POST")
+        url = "http://%s/push?path=%s" % (host, name)
+        if token:
+            url += "&token=" + token
+        req = urllib.request.Request(url, data=data, method="POST")
         with urllib.request.urlopen(req, timeout=60) as r:
             print("  %-16s %s" % (name, r.read().decode()))
         total += len(data)
@@ -157,7 +172,7 @@ def main():
     files = [a for a in argv if not a.startswith("--")] or PROJECT_FILES
 
     if wifi_host:
-        deploy_over_wifi(files, wifi_host, do_reset)
+        deploy_over_wifi(files, wifi_host, do_reset, read_token())
         return
 
     port = find_port()

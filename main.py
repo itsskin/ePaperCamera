@@ -36,7 +36,8 @@ button{width:100%;padding:14px;font-size:18px;margin-top:12px}</style></head>
 </select>
 <select id="delay">
 <option value="0">Без задержки</option>
-<option value="1" selected>Задержка 1 с</option>
+<option value="0.5" selected>Задержка 0.5 с</option>
+<option value="1">Задержка 1 с</option>
 <option value="2">Задержка 2 с</option>
 <option value="3">Задержка 3 с</option>
 <option value="5">Задержка 5 с</option>
@@ -73,10 +74,13 @@ button{width:100%;padding:14px;font-size:18px;margin-top:12px}</style></head>
 Точка доступа <b>{ap_ssid}</b> поднята всегда — http://{cur_ap}/<br>
 Камера работает и без домашней сети, через точку доступа.</p>
 <form action="/wifi_save" method="get">
-<input name="ssid" value="{cur_ssid}" placeholder="SSID" required>
-<input name="password" type="password" placeholder="Пароль">
+<input name="ssid" value="{cur_ssid}" placeholder="SSID домашней сети" required>
+<input name="password" type="password" placeholder="Пароль домашней сети (пусто — не менять)">
+<input name="ap_password" type="password" placeholder="Новый пароль точки доступа (8+ символов)">
+<input name="push_token" placeholder="Токен заливки кода (пусто — не менять, минус — снять)">
 <button type="submit">Сохранить и перезагрузить</button>
 </form>
+<p style="color:#888;font-size:14px">{security}</p>
 <script>
 function redraw(){
   const algo = document.getElementById('algo').value;
@@ -298,7 +302,7 @@ CAMERA_IDLE_MS = 10000
 # Задержка между нажатием и кадром (автоспуск). Живёт на плате, а не в
 # браузере: кнопкой BOOT снимают вообще без веба, и задержка там нужна
 # та же самая.
-DEFAULT_DELAY_MS = 1000
+DEFAULT_DELAY_MS = 500
 
 # Режим панели по умолчанию — 4 градации: полутонов заметно больше, а
 # лишние 3.2с на обновление уходят в фон и путь съёмки не задерживают.
@@ -675,6 +679,19 @@ def run_camera_server(ip, ap_ip=""):
         if state["raw"] is None:
             capture_now()
 
+    def security_note(cfg):
+        """Честно говорит, что открыто. Пароль точки доступа по умолчанию
+        лежит в публичном репозитории, а заливка кода без токена означает,
+        что любой в радиусе Wi-Fi может выполнить на плате свой код."""
+        warn = []
+        if not cfg.get("ap_password"):
+            warn.append("пароль точки доступа стандартный и есть в публичном репозитории")
+        if not cfg.get("push_token"):
+            warn.append("заливка кода не требует токена")
+        if not warn:
+            return "Пароль точки доступа и токен заливки заданы."
+        return "Внимание: " + "; ".join(warn) + "."
+
     def handle_index(query, headers, body=None):
         # .replace, а не .format: в CSS странице полно фигурных скобок,
         # format на них падает с KeyError.
@@ -683,7 +700,8 @@ def run_camera_server(ip, ap_ip=""):
                 .replace("{cur_ssid}", cfg.get("ssid", "") or "не задана")
                 .replace("{cur_ip}", ip or "не подключено")
                 .replace("{cur_ap}", ap_ip or "-")
-                .replace("{ap_ssid}", wifi_manager.AP_SSID))
+                .replace("{ap_ssid}", wifi_manager.AP_SSID)
+                .replace("{security}", security_note(cfg)))
         return 200, "text/html", page.encode()
 
     def handle_capture(query, headers, body=None):
@@ -769,7 +787,11 @@ def run_camera_server(ip, ap_ip=""):
         ssid = query.get("ssid", "")
         if not ssid:
             return 200, "text/html", "<h3>Введите SSID</h3>".encode()
-        wifi_manager.save_config(ssid, query.get("password", ""))
+        wifi_manager.save_config(
+            ssid, query.get("password", ""),
+            ap_password=query.get("ap_password", ""),
+            push_token=query.get("push_token", ""),
+        )
         mark_planned_reboot()
         # Перезагружаемся не здесь, а из холостого хода цикла: ответ
         # странице ещё не отправлен, его отправляет run_server уже после
@@ -784,6 +806,9 @@ def run_camera_server(ip, ap_ip=""):
         # Заливка исходников по сети. Появилась не от хорошей жизни:
         # драйвер USB-моста на маке регулярно залипает и перестаёт менять
         # скорость порта, а плата при этом жива и доступна по Wi-Fi.
+        token = wifi_manager.push_token()
+        if token and query.get("token", "") != token:
+            return 403, "text/plain", "Неверный токен заливки".encode()
         name = query.get("path", "")
         if not valid_module_name(name):
             return 400, "text/plain", ("Недопустимое имя: %r" % name).encode()
